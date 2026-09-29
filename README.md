@@ -519,6 +519,50 @@ When resizing a pool:
 - If you increase the size, new workers will be created as needed up to the new maximum
 - If you decrease the size, existing workers will continue running until they complete their current tasks, but no new workers will be created until the number of running workers is below the new maximum
 
+### Group pools: named groups with priority, pause/resume and per-group stats (v2)
+
+`NewGroupPool` creates a pool where every task is submitted to a named group. Groups only affect the order in which queued tasks are picked for execution; the pool's overall concurrency limit is unchanged.
+
+The dispatching order is deterministic: among all queued tasks belonging to groups that are not paused, the task with the highest priority is picked first, and ties are broken by submission order (FIFO). Tasks within the same group are always dispatched in submission order. This guarantees that a small number of high priority tasks (e.g. notifications) are never starved by a large batch of lower priority tasks (e.g. reconciliation jobs).
+
+``` go
+// Create a group pool with 10 workers
+pool := pond.NewGroupPool(10)
+
+// Submit a large batch of low priority tasks
+for i := 0; i < 10000; i++ {
+    pool.Submit("reconcile", func() {
+        // Do some work
+    })
+}
+
+// High priority tasks submitted later are dispatched before the queued batch
+pool.Submit("notify", func() {
+    // Do some work
+}, pond.WithPriority(10))
+
+// Pause a group: its queued tasks are not picked up until it is resumed
+pool.Pause("reconcile")
+pool.Resume("reconcile")
+
+// Query per-group statistics (readable even after the pool is stopped)
+stats := pool.Stats("reconcile")
+fmt.Printf("submitted: %d, completed: %d, failed: %d, queued: %d\n",
+    stats.Submitted, stats.Completed, stats.Failed, stats.Queued)
+
+// Stopping the pool works like regular pools: running tasks complete,
+// queued tasks are dropped and their futures resolve to pond.ErrPoolStopped
+pool.StopAndWait()
+```
+
+- `pool.Go(group string, task func(), opts ...GroupOption) error`: submits a task to a group in a fire-and-forget fashion
+- `pool.Submit(group string, task func(), opts ...GroupOption) Task`: submits a task to a group and returns a future to wait for its completion
+- `pool.SubmitErr(group string, task func() error, opts ...GroupOption) Task`: submits a task that returns an error to a group
+- `pond.WithPriority(priority int)`: sets the priority of a submitted task (higher values are dispatched first, defaults to 0)
+- `pool.Pause(group string)` / `pool.Resume(group string)` / `pool.Paused(group string) bool`: pauses and resumes a group. Pausing a group that does not exist yet creates it
+- `pool.Stats(group string) GroupStats`: returns the number of submitted, completed, failed and currently queued tasks of a group
+- `pool.Groups() []string`: returns the names of all known groups
+
 ### Metrics & monitoring
 
 Each worker pool instance exposes useful metrics that can be queried through the following methods:
